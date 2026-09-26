@@ -44,6 +44,7 @@ type NetworkFacts struct {
 	DERPTCP443 Observation
 
 	FastestDERP        string
+	FastestDERPName    string
 	FastestDERPLatency time.Duration
 	DERPLatencies      map[string]time.Duration
 
@@ -116,11 +117,20 @@ func factsFromNetworkReports(derpMap *tailcfg.DERPMap, stunReport *netcheck.Repo
 	if derpErr == nil && derpReport != nil {
 		facts.DERPProbeCompleted = true
 		facts.DERPLatencies = make(map[string]time.Duration, len(derpReport.RegionLatency))
+		fastestSelected := false
 		for regionID, latency := range derpReport.RegionLatency {
 			name := derpRegionName(derpMap, regionID)
 			facts.DERPLatencies[name] = latency
-			if facts.FastestDERP == "" || latency < facts.FastestDERPLatency {
-				facts.FastestDERP = name
+			if !fastestSelected || latency < facts.FastestDERPLatency {
+				fastestSelected = true
+				facts.FastestDERP = ""
+				facts.FastestDERPName = ""
+				if derpMap != nil {
+					if region := derpMap.Regions[regionID]; region != nil {
+						facts.FastestDERP = region.RegionCode
+						facts.FastestDERPName = region.RegionName
+					}
+				}
 				facts.FastestDERPLatency = latency
 			}
 		}
@@ -291,18 +301,24 @@ func observationResult(id, label string, observation Observation) Result {
 
 func fastestDERPResult(facts NetworkFacts) Result {
 	result := Result{ID: "fastest_derp", Label: "Fastest DERP", Severity: Pass}
-	if facts.FastestDERP == "" {
+	if facts.FastestDERP == "" && facts.FastestDERPName == "" {
 		result.Severity = Unknown
-		result.Value = "unknown"
+		result.Value = "unavailable"
 		return result
 	}
 	result.Value = facts.FastestDERP
+	if facts.FastestDERPName != "" {
+		result.Value = facts.FastestDERPName
+		if facts.FastestDERP != "" {
+			result.Value += " (" + facts.FastestDERP + ")"
+		}
+	}
 	return result
 }
 
 func derpLatencyResult(facts NetworkFacts) Result {
 	result := Result{ID: "derp_latency", Label: "TCP/443 latency", Severity: Pass}
-	if facts.FastestDERP == "" {
+	if facts.DERPTCP443 != ObservationAvailable {
 		result.Severity = Unknown
 		result.Value = "unknown"
 		return result
