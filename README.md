@@ -129,6 +129,24 @@ The local Tailscale client must be installed and its LocalAPI must be
 available. Taildoctor uses the LocalAPI rather than parsing human-readable
 Tailscale CLI output.
 
+## Exit codes
+
+Taildoctor separates the diagnostic status shown to a human from the overall
+readiness outcome and the shell process exit code. Currently, for `check`,
+`network`, and `dns`:
+
+| Diagnostic status | Overall outcome | Exit |
+| --- | --- | ---: |
+| PASS — healthy | Usable | 0 |
+| WARN — usable, but needs attention | Usable | 0 |
+| FAIL — definite problem established | Definite failure | 1 |
+| UNKNOWN — reliable readiness not established | Unable to establish readiness | 1 |
+
+WARN can still exit 0: exit status reflects whether the requested diagnostic
+produced a usable result, not whether every individual result was PASS. UNKNOWN
+means the evidence was insufficient, rather than proving a definite failure.
+Invalid CLI usage exits 2. Collection or output errors also exit 1.
+
 ## Design Philosophy
 
 Taildoctor separates:
