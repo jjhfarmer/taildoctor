@@ -1,3 +1,5 @@
+<img width="1580" height="444" alt="taildoctor_logo" src="https://github.com/user-attachments/assets/4e0b861f-1236-4a6d-ad1e-443c33dff1d9" />
+
 # Taildoctor
 
 Taildoctor is an open-source diagnostic CLI for troubleshooting Tailscale
