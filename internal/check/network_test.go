@@ -77,8 +77,8 @@ func TestEvaluateNetworkUnknownObservation(t *testing.T) {
 
 func TestNetworkReportMappingAndFastestDERP(t *testing.T) {
 	derpMap := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
-		1: {RegionID: 1, RegionCode: "lon"},
-		2: {RegionID: 2, RegionCode: "ams"},
+		1: {RegionID: 1, RegionCode: "lon", RegionName: "London"},
+		2: {RegionID: 2, RegionCode: "ams", RegionName: "Amsterdam"},
 	}}
 	stun := &netcheck.Report{
 		UDP:                   true,
@@ -93,14 +93,60 @@ func TestNetworkReportMappingAndFastestDERP(t *testing.T) {
 		2: 9 * time.Millisecond,
 	}}
 	facts := factsFromNetworkReports(derpMap, stun, nil, derp, nil)
-	if facts.FastestDERP != "ams" || facts.FastestDERPLatency != 9*time.Millisecond {
-		t.Fatalf("fastest DERP = %q/%v", facts.FastestDERP, facts.FastestDERPLatency)
+	if facts.FastestDERP != "ams" || facts.FastestDERPName != "Amsterdam" || facts.FastestDERPLatency != 9*time.Millisecond {
+		t.Fatalf("fastest DERP = %q/%q/%v", facts.FastestDERPName, facts.FastestDERP, facts.FastestDERPLatency)
 	}
 	if facts.NATMapping != NATMappingStable {
 		t.Fatalf("NAT mapping = %d, want stable", facts.NATMapping)
 	}
 	if facts.UDP != ObservationAvailable || facts.IPv4STUN != ObservationAvailable || facts.IPv6STUN != ObservationUnavailable {
 		t.Fatalf("unexpected STUN observations: %#v", facts)
+	}
+}
+
+func TestNetworkFastestDERPDisplay(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		region *tailcfg.DERPRegion
+		want   string
+	}{
+		{"friendly name and code", &tailcfg.DERPRegion{RegionCode: "lhr", RegionName: "London"}, "London (lhr)"},
+		{"code only", &tailcfg.DERPRegion{RegionCode: "lhr"}, "lhr"},
+		{"missing metadata", nil, "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			derpMap := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{}}
+			if test.region != nil {
+				derpMap.Regions[1] = test.region
+			}
+			derp := &netcheck.Report{RegionLatency: map[int]time.Duration{1: 8 * time.Millisecond}}
+			facts := factsFromNetworkReports(derpMap, nil, nil, derp, nil)
+			result := fastestDERPResult(facts)
+			if result.Value != test.want {
+				t.Fatalf("Fastest DERP = %q, want %q", result.Value, test.want)
+			}
+			if facts.FastestDERPLatency != 8*time.Millisecond || derpLatencyResult(facts).Value != "8ms" {
+				t.Fatalf("latency changed: %#v", facts)
+			}
+		})
+	}
+}
+
+func TestRenderNetworkHealthyFriendlyDERP(t *testing.T) {
+	derpMap := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
+		1: {RegionCode: "lhr", RegionName: "London"},
+	}}
+	stun := &netcheck.Report{UDP: true, IPv4: true, IPv4CanSend: true}
+	derp := &netcheck.Report{RegionLatency: map[int]time.Duration{1: 8 * time.Millisecond}}
+	report := EvaluateNetwork(factsFromNetworkReports(derpMap, stun, nil, derp, nil))
+	var output bytes.Buffer
+	if err := RenderNetwork(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Summary: PASS  Network readiness looks healthy", "Fastest DERP        London (lhr)", "TCP/443 latency     8ms"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, output.String())
+		}
 	}
 }
 
