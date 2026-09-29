@@ -24,6 +24,7 @@ const (
 	LookupResolvedExpected   LookupState = "resolved_expected"
 	LookupResolvedUnexpected LookupState = "resolved_unexpected"
 	LookupIncomplete         LookupState = "incomplete"
+	LookupPermissionDenied   LookupState = "permission_denied"
 )
 
 type LookupFact struct {
@@ -135,7 +136,11 @@ func tailscaleSelfLookup(ctx context.Context, query dnsQueryFunc, name string, e
 		}
 		packet, _, err := query(ctx, name, q.kind)
 		if err != nil {
-			*q.state = LookupIncomplete
+			if local.IsAccessDeniedError(err) {
+				*q.state = LookupPermissionDenied
+			} else {
+				*q.state = LookupIncomplete
+			}
 			continue
 		}
 		addresses, state := parseSelfDNSResponse(packet, name, q.kind)
@@ -151,7 +156,7 @@ func tailscaleSelfLookup(ctx context.Context, query dnsQueryFunc, name string, e
 }
 
 func combineFamilyLookups(states ...LookupState) LookupState {
-	var unexpected, incomplete, attempted bool
+	var unexpected, incomplete, permissionDenied, attempted bool
 	for _, state := range states {
 		switch state {
 		case LookupResolvedExpected:
@@ -160,12 +165,17 @@ func combineFamilyLookups(states ...LookupState) LookupState {
 			unexpected, attempted = true, true
 		case LookupIncomplete:
 			incomplete, attempted = true, true
+		case LookupPermissionDenied:
+			permissionDenied, attempted = true, true
 		case LookupFailed, LookupNoAddress:
 			attempted = true
 		}
 	}
 	if incomplete {
 		return LookupIncomplete
+	}
+	if permissionDenied {
+		return LookupPermissionDenied
 	}
 	if unexpected {
 		return LookupResolvedUnexpected
@@ -308,8 +318,12 @@ func EvaluateDNS(f DNSFacts, collectionErr error) DNSReport {
 		Result{ID: "magicdns_state", Label: "MagicDNS", Severity: Pass, Value: dnsEnabledText(f.MagicDNS)},
 	)
 	if f.MagicDNS != ObservationUnknown {
+		tailscaleLookupSeverity := lookupSeverity(f.TailscaleLookup.State)
+		if f.TailscaleLookup.State == LookupPermissionDenied && r.Outcome == OutcomeUsable {
+			tailscaleLookupSeverity = Warn
+		}
 		r.Results = append(r.Results,
-			Result{ID: "tailscale_lookup", Label: "Tailscale lookup", Severity: lookupSeverity(f.TailscaleLookup.State), Value: lookupText(f.TailscaleLookup.State)},
+			Result{ID: "tailscale_lookup", Label: "Tailscale lookup", Severity: tailscaleLookupSeverity, Value: lookupText(f.TailscaleLookup.State)},
 			Result{ID: "os_lookup", Label: "OS lookup", Severity: lookupSeverity(f.OSLookup.State), Value: lookupText(f.OSLookup.State)},
 		)
 		if f.MagicDNS == ObservationAvailable {
@@ -317,7 +331,7 @@ func EvaluateDNS(f DNSFacts, collectionErr error) DNSReport {
 				id, label string
 				state     LookupState
 			}{{"lookup_a", "A query", f.TailscaleLookup.A}, {"lookup_aaaa", "AAAA query", f.TailscaleLookup.AAAA}} {
-				if family.state != LookupNotAttempted && !(family.state == LookupNoAddress && f.TailscaleLookup.State == LookupResolvedExpected) {
+				if family.state != LookupNotAttempted && family.state != LookupPermissionDenied && !(family.state == LookupNoAddress && f.TailscaleLookup.State == LookupResolvedExpected) {
 					r.Results = append(r.Results, Result{ID: family.id, Label: family.label, Severity: lookupSeverity(family.state), Value: lookupText(family.state)})
 				}
 			}
@@ -382,7 +396,7 @@ func lookupSeverity(s LookupState) Severity {
 	switch s {
 	case LookupResolvedExpected:
 		return Pass
-	case LookupIncomplete, LookupNotAttempted:
+	case LookupIncomplete, LookupPermissionDenied, LookupNotAttempted:
 		return Unknown
 	default:
 		return Warn
@@ -401,6 +415,8 @@ func lookupText(s LookupState) string {
 		return "name not resolved"
 	case LookupIncomplete:
 		return "incomplete"
+	case LookupPermissionDenied:
+		return "permission denied"
 	default:
 		return "not attempted"
 	}
@@ -434,13 +450,22 @@ func dnsVerdictExplanation(s Severity) string {
 
 func PresentDNS(r DNSReport) Presentation {
 	p := Presentation{Summary: dnsSummary(r)}
+	permissionDenied := r.Facts.TailscaleLookup.State == LookupPermissionDenied
 	for _, result := range r.Results {
 		switch result.ID {
 		case "self_resolution", "dns_evidence", "magicdns":
-			if result.Severity != Pass {
+			if result.Severity != Pass && !permissionDenied {
 				p.Primary = append(p.Primary, result)
 			}
-		case "tailscale_dns", "magicdns_state", "tailscale_lookup", "os_lookup", "lookup_a", "lookup_aaaa":
+		case "tailscale_lookup":
+			if permissionDenied {
+				result.Explanation = "The local Tailscale daemon denied access to the DNS diagnostic endpoint. This does not indicate a MagicDNS failure."
+				result.Recommendation = "On Linux, run Taildoctor as a permitted Tailscale operator user; an administrator can configure one with sudo tailscale set --operator=<username>."
+				p.Primary = append(p.Primary, result)
+			} else {
+				p.Supporting = append(p.Supporting, result)
+			}
+		case "tailscale_dns", "magicdns_state", "os_lookup", "lookup_a", "lookup_aaaa":
 			if result.ID != "lookup_a" && result.ID != "lookup_aaaa" || result.Severity != Pass {
 				p.Supporting = append(p.Supporting, result)
 			}
@@ -452,6 +477,9 @@ func PresentDNS(r DNSReport) Presentation {
 }
 
 func dnsSummary(r DNSReport) string {
+	if r.Facts.TailscaleLookup.State == LookupPermissionDenied && r.Outcome == OutcomeUsable {
+		return "WARN  Tailscale DNS diagnostics are partially unavailable"
+	}
 	if r.Outcome == OutcomeDefiniteFail {
 		return "FAIL  The tested self name did not resolve to this node"
 	}
@@ -496,6 +524,11 @@ func RenderDNS(w io.Writer, r DNSReport) error {
 			}
 			if group.name == "Primary finding" && result.Explanation != "" {
 				if _, err := fmt.Fprintf(w, "                      %s\n", result.Explanation); err != nil {
+					return err
+				}
+			}
+			if group.name == "Primary finding" && result.Recommendation != "" {
+				if _, err := fmt.Fprintf(w, "                      Recommendation: %s\n", result.Recommendation); err != nil {
 					return err
 				}
 			}

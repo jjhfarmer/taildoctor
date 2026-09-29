@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"tailscale.com/client/local"
 	"tailscale.com/types/dnstype"
 )
 
@@ -21,6 +24,10 @@ type fakeDNSProvider struct {
 	facts DNSFacts
 	err   error
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func (p fakeDNSProvider) CollectDNSFacts(context.Context) (DNSFacts, error) { return p.facts, p.err }
 
@@ -179,6 +186,85 @@ func TestTailscaleDNSFamiliesAndAddressMatching(t *testing.T) {
 	f = tailscaleSelfLookup(context.Background(), query6, selfFQDN, []string{"fd7a:115c:a1e0::1"})
 	if f.State != LookupResolvedExpected || f.A != LookupNotAttempted || !reflect.DeepEqual(queries, []string{"AAAA"}) {
 		t.Fatalf("IPv6: %#v %v", f, queries)
+	}
+}
+
+func TestQueryDNSPermissionDeniedClassification(t *testing.T) {
+	client := &local.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("sensitive daemon permission detail")),
+		}, nil
+	})}
+	query := func(ctx context.Context, name, kind string) ([]byte, []*dnstype.Resolver, error) {
+		return client.QueryDNS(ctx, name, kind)
+	}
+	f := tailscaleSelfLookup(context.Background(), query, selfFQDN, []string{"100.64.0.1"})
+	if f.State != LookupPermissionDenied || f.A != LookupPermissionDenied {
+		t.Fatalf("permission lookup = %#v", f)
+	}
+}
+
+func TestQueryDNSGenericErrorRemainsIncomplete(t *testing.T) {
+	query := func(context.Context, string, string) ([]byte, []*dnstype.Resolver, error) {
+		return nil, nil, errors.New("generic query failure")
+	}
+	f := tailscaleSelfLookup(context.Background(), query, selfFQDN, []string{"100.64.0.1"})
+	if f.State != LookupIncomplete || f.A != LookupIncomplete {
+		t.Fatalf("generic error lookup = %#v", f)
+	}
+}
+
+func TestDNSPermissionDeniedOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		os       LookupState
+		severity Severity
+		outcome  Outcome
+	}{
+		{"OS expected match", LookupResolvedExpected, Warn, OutcomeUsable},
+		{"OS incomplete", LookupIncomplete, Unknown, OutcomeUnreliable},
+		{"OS negative", LookupFailed, Unknown, OutcomeUnreliable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := dnsFacts(LookupPermissionDenied, test.os)
+			f.TailscaleLookup.A = LookupPermissionDenied
+			r := EvaluateDNS(f, nil)
+			if r.Outcome != test.outcome {
+				t.Fatalf("outcome = %q, want %q", r.Outcome, test.outcome)
+			}
+			finding, ok := findResult(r.Results, "self_resolution")
+			if !ok || finding.Severity != test.severity {
+				t.Fatalf("self resolution = %#v, want severity %q", finding, test.severity)
+			}
+		})
+	}
+}
+
+func TestRenderDNSPermissionDenied(t *testing.T) {
+	f := dnsFacts(LookupPermissionDenied, LookupResolvedExpected)
+	f.TailscaleLookup.A = LookupPermissionDenied
+	report := EvaluateDNS(f, nil)
+	var output bytes.Buffer
+	if err := RenderDNS(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, want := range []string{
+		"Summary: WARN  Tailscale DNS diagnostics are partially unavailable",
+		"Tailscale lookup    permission denied",
+		"OS lookup           expected address found",
+		"The local Tailscale daemon denied access to the DNS diagnostic endpoint.",
+		"Recommendation: On Linux, run Taildoctor as a permitted Tailscale operator user",
+		"sudo tailscale set --operator=<username>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "sensitive daemon permission detail") || strings.Contains(got, "Access denied:") {
+		t.Fatalf("raw permission error rendered:\n%s", got)
 	}
 }
 
