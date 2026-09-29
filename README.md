@@ -17,8 +17,9 @@ Currently implemented:
 
 - `taildoctor check` — local daemon, backend/authentication readiness, and health
 - `taildoctor network` — UDP/STUN and DERP TCP/443 network readiness
+- `taildoctor dns` — Tailscale DNS, MagicDNS, and OS resolver readiness
 
-## Example
+## Examples
 
 ```text
 $ taildoctor network
@@ -34,8 +35,27 @@ Network information:
 	IPv4 STUN           observed
 	IPv6 STUN           observed
 	OS IPv6             observed
-	Fastest DERP        lhr
+	Fastest DERP        London (lhr)
 	TCP/443 latency     8ms
+```
+
+```text
+$ taildoctor dns
+
+Summary: PASS  This node's MagicDNS name resolves to its Tailscale address
+
+Supporting evidence:
+	Tailscale DNS       enabled
+	MagicDNS            enabled
+	Tailscale lookup    expected address found
+	OS lookup           expected address found
+
+Descriptive information:
+	Self FQDN           example.tailnet.ts.net.
+	Tailnet suffix      tailnet.ts.net
+	Global resolvers    0 configured
+	Split DNS routes    2 configured
+	Search domains      1 configured
 ```
 
 ## Why Taildoctor?
@@ -110,6 +130,23 @@ destination-dependent NAT mapping behavior.
 The command does not claim that a failed UDP probe proves firewall blocking,
 or that a successful STUN probe guarantees a direct path to a particular peer.
 
+## `taildoctor dns`
+
+Compares the node's Tailscale DNS configuration with active lookups through
+Tailscale and the operating system resolver.
+
+It currently examines:
+
+- whether Tailscale DNS and MagicDNS are enabled
+- the node's MagicDNS name and expected Tailscale addresses
+- whether a Tailscale DNS lookup returns an expected address
+- whether the operating system resolver returns an expected address
+- configured global resolvers, split DNS routes, and search domains
+
+The command distinguishes a DNS failure from incomplete collection or denied
+access to the LocalAPI DNS diagnostic endpoint. A permission denial does not by
+itself indicate a MagicDNS failure.
+
 ## Build And Run
 
 Taildoctor currently requires Go 1.26.6 or newer.
@@ -125,6 +162,7 @@ Run the commands during development:
 ```sh
 go run ./cmd/taildoctor check
 go run ./cmd/taildoctor network
+go run ./cmd/taildoctor dns
 ```
 
 The local Tailscale client must be installed and its LocalAPI must be
@@ -153,9 +191,9 @@ Invalid CLI usage exits 2. Collection or output errors also exit 1.
 
 Taildoctor separates:
 
-1. **Observed facts** — values returned by Tailscale or measured by a probe
-2. **Interpretation** — what those facts suggest about Tailscale operation
-3. **Recommendations** — what an operator might investigate next
+1. **Observed facts** : values returned by Tailscale or measured by a probe
+2. **Interpretation** : what those facts suggest about Tailscale operation
+3. **Recommendations** : what an operator might investigate next
 
 For example:
 
@@ -175,14 +213,12 @@ The implementation keeps vendor-specific Tailscale types behind collection
 adapters and evaluates Taildoctor-owned facts. Each diagnostic area is built
 as a small, independently testable vertical slice.
 
-## Privacy And Security
+## Privacy & Security
 
-Privacy is part of the design rather than a later cleanup task.
-
-- Do not display node private keys or public keys.
-- Do not display authentication URLs.
-- Do not shell out to parse human-readable Tailscale output.
-- Prefer Tailscale's supported public Go APIs and LocalAPI.
+- Does not display node private keys or public keys.
+- Does not display authentication URLs.
+- Does not shell out to parse human-readable Tailscale output.
+- Preference for Tailscale's supported public Go APIs and LocalAPI.
 - Keep raw Tailscale types behind collection adapters.
 - Avoid collecting peer data unless a diagnostic requires it.
 - Do not send diagnostic data anywhere.
@@ -194,8 +230,9 @@ redaction rules remain future work.
 
 ## Platform Status
 
-Taildoctor is designed to be cross-platform. Development and current smoke
-testing have been performed on macOS; Windows and Linux validation is planned.
+Taildoctor is designed to be cross-platform. It has been validated on macOS,
+Windows, and Linux ARM64. Windows and Linux ARM64 were also validated using
+downloaded release artifacts.
 
 The commands require a running Tailscale installation with accessible LocalAPI
 permissions. The `network` command also requires an active network because it
@@ -206,6 +243,12 @@ be configured as the Tailscale operator. An administrator can configure this
 with `sudo tailscale set --operator=<username>`. This requirement does not
 apply to every Taildoctor command.
 
+If access is denied but the OS resolver returns the expected address,
+`taildoctor dns` reports WARN with a usable result and exits 0. It preserves
+the positive resolver evidence while explaining that Taildoctor could not
+independently inspect the Tailscale DNS path. Without enough positive evidence
+to establish usability, the result is UNKNOWN and exits nonzero.
+
 The project currently uses Tailscale `v1.102.5` and Go `1.26.6`.
 The `tailscale.com/net/netcheck` package is public and tagged, but does not
 carry the same explicit stability guarantees as the stable LocalAPI methods.
@@ -213,11 +256,10 @@ That dependency is deliberate and documented as a compatibility risk.
 
 ## Current Limitations
 
-- There is no JSON output.
-- There is no support-bundle command.
-- There are no DNS diagnostics.
-- There are no peer reachability diagnostics.
-- The network command does not test connectivity to a particular peer.
+- No JSON output.
+- No support-bundle command.
+- No peer reachability diagnostics.
+- Network command does not test connectivity to a particular peer.
 - UDP/STUN results do not prove that a specific peer can or cannot connect
 	directly.
 - DERP latency is descriptive and has no built-in high-latency threshold.
@@ -230,16 +272,10 @@ That dependency is deliberate and documented as a compatibility risk.
 
 Planned diagnostic areas include:
 
-- DNS and MagicDNS diagnostics
-- peer-specific reachability diagnostics
-- deeper authentication and machine-authorization diagnostics
-- human-readable support bundles
-- machine-readable output
-- broader interpretation of Tailscale health and route information
-
-The roadmap is intentionally incremental. Each area should begin with a small
-vertical slice, focused tests, and an explicit review of API stability and
-privacy impact.
+- Peer-specific reachability diagnostics
+- Deeper authentication and machine-authorization diagnostics
+- Human-readable support bundles
+- JSON and other machine-readable output
 
 ## Development
 
@@ -257,13 +293,12 @@ go vet ./...
 
 The development approach is:
 
-1. understand the relevant Tailscale API and data structures
-2. define a small diagnostic model
-3. separate collection from interpretation
-4. write focused tests
-5. implement the smallest useful vertical slice
-6. document assumptions and limitations
+1. Understand the relevant Tailscale API and data structures
+2. Define a small diagnostic model
+3. Separate collection from interpretation
+4. Write focused tests
+5. Implement the smallest useful vertical slice
+6. Document assumptions and limitations
 
 Taildoctor should remain a focused tool for diagnosing a Tailscale problem,
 not become a general-purpose Tailscale administration or monitoring system.
-Taildoctor is an open-source, cross-platform diagnostic CLI for Tailscale.
