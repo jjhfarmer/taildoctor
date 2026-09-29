@@ -201,6 +201,11 @@ The commands require a running Tailscale installation with accessible LocalAPI
 permissions. The `network` command also requires an active network because it
 performs fresh STUN and DERP TCP/443 probes.
 
+On Linux, the Tailscale DNS diagnostic endpoint may require the current user to
+be configured as the Tailscale operator. An administrator can configure this
+with `sudo tailscale set --operator=<username>`. This requirement does not
+apply to every Taildoctor command.
+
 The project currently uses Tailscale `v1.102.5` and Go `1.26.6`.
 The `tailscale.com/net/netcheck` package is public and tagged, but does not
 carry the same explicit stability guarantees as the stable LocalAPI methods.
